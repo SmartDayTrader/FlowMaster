@@ -1,0 +1,229 @@
+//@version=5
+indicator("FlowMaster", "FlowM", overlay=false)
+
+// Входные параметры
+timeframe_input = input.string(defval='Auto', title='Higher Time Frame', 
+     options=['Auto', '1', '5', '10', '15', '30', '60', '120', '180', '240', '360', '480', '720', 'D', 'W', '2W', 'M', '3M', '6M', '12M'])
+percent_va = input.float(70.0, title="Value Area %", minval=1, maxval=100) / 100
+show_signals = input.bool(true, title="Show Buy/Sell Signals")
+show_histogram = input.bool(true, title="Show Dominance Histogram")
+sensitivity = input.int(5, title="Signal Sensitivity", minval=1, maxval=20)
+
+// Цвета
+buyer_color = input.color(color.new(color.green, 0), title="Buyer Color")
+seller_color = input.color(color.new(color.red, 0), title="Seller Color")
+neutral_color = input.color(color.new(color.gray, 50), title="Neutral Color")
+
+// Определение таймфрейма
+get_timeframe() =>
+    if timeframe_input == 'Auto'
+        switch timeframe.period
+            '1' => '120'
+            '2' => '180'
+            '3' => '240'
+            '5' => 'D'
+            '10' => 'W'
+            '15' => 'W'
+            '30' => 'W'
+            '45' => 'W'
+            '60' => 'W'
+            '120' => 'M'
+            '180' => 'M'
+            '240' => 'M'
+            'D' => '12M'
+            'W' => '12M'
+            => 'D'
+    else
+        timeframe_input
+
+selected_tf = get_timeframe()
+
+// Переменные для хранения данных
+var float htf_high = na
+var float htf_low = na
+var float session_high = high
+var float session_low = low
+var int bar_count = 0
+var int session_length = 0
+
+// Определение нового бара высшего таймфрейма
+new_session = ta.change(time(selected_tf)) != 0
+
+if new_session
+    htf_high := high
+    htf_low := low
+    bar_count := 0
+else
+    htf_high := math.max(htf_high, high)
+    htf_low := math.min(htf_low, low)
+    bar_count += 1
+
+if new_session
+    session_high := htf_high[1]
+    session_low := htf_low[1]
+    session_length := bar_count[1]
+
+// Расчет каналов Market Profile
+channel_size = (session_high - session_low) / 20
+
+// Функция для проверки пересечения диапазонов
+range_overlap(t1, t2, t3, t4) =>
+    (t3 >= t1 and t3 <= t2) or (t4 >= t1 and t4 <= t2) or (t3 <= t1 and t4 >= t2)
+
+// Расчет TPO (Time Price Opportunity) для каждого канала
+get_tpo_volume(lower_bound, upper_bound) =>
+    float volume_sum = 0.0
+    for i = 1 to session_length
+        if i <= bar_index and range_overlap(lower_bound, upper_bound, low[i], high[i])
+            volume_sum += volume[i]
+    volume_sum
+
+// Массив для хранения объемов каналов
+var channel_volumes = array.new<float>(22, 0.0)
+
+if new_session
+    for i = 1 to 20
+        lower = session_low + (i - 1) * channel_size
+        upper = session_low + i * channel_size
+        vol = get_tpo_volume(lower, upper)
+        array.set(channel_volumes, i, vol)
+
+// Поиск POC (Point of Control)
+var float total_volume = 0.0
+var int poc_index = 0
+var float poc_volume = 0.0
+
+if new_session
+    total_volume := 0.0
+    poc_volume := 0.0
+    poc_index := 0
+    
+    for i = 1 to 20
+        vol = array.get(channel_volumes, i)
+        total_volume += vol
+        if vol > poc_volume
+            poc_volume := vol
+            poc_index := i
+
+// Расчет Value Area
+var float va_volume = 0.0
+var int va_high_index = poc_index
+var int va_low_index = poc_index
+
+if new_session
+    va_volume := poc_volume
+    va_high_index := poc_index
+    va_low_index := poc_index
+    
+    for i = 1 to 20
+        if va_volume >= total_volume * percent_va
+            break
+        
+        high_vol = va_high_index < 20 ? array.get(channel_volumes, va_high_index + 1) : 0.0
+        low_vol = va_low_index > 1 ? array.get(channel_volumes, va_low_index - 1) : 0.0
+        
+        if high_vol >= low_vol and va_high_index < 20
+            va_high_index += 1
+            va_volume += high_vol
+        else if va_low_index > 1
+            va_low_index -= 1
+            va_volume += low_vol
+
+// Расчет текущей позиции цены относительно POC и VA
+get_channel_middle(index) =>
+    session_low + (index - 0.5) * channel_size
+
+poc_price = get_channel_middle(poc_index)
+va_high_price = get_channel_middle(va_high_index)
+va_low_price = get_channel_middle(va_low_index)
+
+// Определение доминирования
+price_vs_poc = close > poc_price ? 1 : close < poc_price ? -1 : 0
+price_vs_va = close > va_high_price ? 2 : close < va_low_price ? -2 : 0
+
+// Анализ объемного профиля для определения доминирования
+upper_va_volume = 0.0
+lower_va_volume = 0.0
+
+for i = poc_index to va_high_index
+    upper_va_volume += array.get(channel_volumes, i)
+
+for i = va_low_index to poc_index
+    lower_va_volume += array.get(channel_volumes, i)
+
+volume_imbalance = (upper_va_volume - lower_va_volume) / (upper_va_volume + lower_va_volume) * 100
+
+// Дополнительные факторы для анализа доминирования
+price_momentum = ta.sma(close - close[1], 5)
+volume_trend = ta.sma(volume, 5) > ta.sma(volume, 20) ? 1 : -1
+
+// Итоговый индекс доминирования
+dominance_score = price_vs_poc * 10 + price_vs_va * 5 + volume_imbalance * 0.5 + price_momentum * 100 + volume_trend * 5
+
+// Сглаживание сигнала
+smooth_dominance = ta.ema(dominance_score, sensitivity)
+
+// Определение состояния рынка
+market_state = smooth_dominance > 10 ? 1 : smooth_dominance < -10 ? -1 : 0
+
+// Визуализация
+bgcolor_color = market_state == 1 ? color.new(buyer_color, 90) : market_state == -1 ? color.new(seller_color, 90) : color.new(neutral_color, 95)
+
+bgcolor(bgcolor_color)
+
+// Гистограмма доминирования
+hist_color = smooth_dominance > 0 ? buyer_color : seller_color
+plot(show_histogram ? smooth_dominance : na, "Dominance", color=hist_color, style=plot.style_histogram, linewidth=2)
+
+// Нулевая линия
+hline(0, "Zero Line", color=color.gray, linestyle=hline.style_dashed)
+
+// Уровни перекупленности/перепроданности
+hline(50, "Overbought", color=color.red, linestyle=hline.style_dotted)
+hline(-50, "Oversold", color=color.green, linestyle=hline.style_dotted)
+
+// Сигналы покупки/продажи
+buy_signal = ta.crossover(smooth_dominance, -10) and market_state[1] != 1
+sell_signal = ta.crossunder(smooth_dominance, 10) and market_state[1] != -1
+
+plotshape(show_signals and buy_signal, "Buy Signal", shape.triangleup, location.bottom, buyer_color, size=size.small)
+plotshape(show_signals and sell_signal, "Sell Signal", shape.triangledown, location.top, seller_color, size=size.small)
+
+// Таблица с информацией
+if barstate.islast
+    var table info_table = table.new(position.top_right, 2, 6, bgcolor=color.white, border_width=1)
+    
+    state_text = market_state == 1 ? "BUYERS" : market_state == -1 ? "SELLERS" : "NEUTRAL"
+    state_color = market_state == 1 ? buyer_color : market_state == -1 ? seller_color : neutral_color
+    
+    table.cell(info_table, 0, 0, "Market State:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 0, state_text, text_color=state_color, text_size=size.small)
+    
+    table.cell(info_table, 0, 1, "Dominance:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 1, str.tostring(math.round(smooth_dominance, 1)), text_color=color.black, text_size=size.small)
+    
+    table.cell(info_table, 0, 2, "Price vs POC:", text_color=color.black, text_size=size.small)
+    poc_text = close > poc_price ? "Above" : close < poc_price ? "Below" : "At"
+    table.cell(info_table, 1, 2, poc_text, text_color=color.black, text_size=size.small)
+    
+    table.cell(info_table, 0, 3, "Volume Imbal.:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 3, str.tostring(math.round(volume_imbalance, 1)) + "%", text_color=color.black, text_size=size.small)
+    
+    table.cell(info_table, 0, 4, "Timeframe:", text_color=color.black, text_size=size.small)
+    table.cell(info_table, 1, 4, selected_tf, text_color=color.black, text_size=size.small)
+
+// === ОТОБРАЖЕНИЕ TELEGRAM-КАНАЛА ===
+var table telegramTable = table.new(position.bottom_right, 1, 1, bgcolor=color.new(color.gray, 80), border_width=0, border_color=color.new(color.gray, 90))
+
+if barstate.islast
+    table.cell(telegramTable, 0, 0, "Telegram ▶️ smart_day_trader", text_color=color.new(color.gray, 40), text_size=size.normal, bgcolor=color.new(color.gray, 85))
+
+// Алерты
+alertcondition(buy_signal, title="FlowMaster: Buyers Dominate", message="FlowMaster: Buyers are taking control - potential buy opportunity")
+alertcondition(sell_signal, title="FlowMaster: Sellers Dominate", message="FlowMaster: Sellers are taking control - potential sell opportunity")
+alertcondition(market_state == 0, title="FlowMaster: Market Neutral", message="FlowMaster: Market is in neutral state")
+
+// Отладочная информация (можно убрать в финальной версии)
+plot(poc_price, "POC Price", color=color.yellow, linewidth=1, display=display.data_window)
+plot(va_high_price, "VA High", color=color.blue, linewidth=1, display=display.data_window)
+plot(va_low_price, "VA Low", color=color.blue, linewidth=1, display=display.data_window)
